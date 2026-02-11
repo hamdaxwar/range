@@ -2,7 +2,6 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-// ==================== KONFIGURASI ====================
 const CACHE_FILE_PATH = path.join(__dirname, '../get/cache_range.json');
 
 const CREDENTIALS = {
@@ -15,70 +14,83 @@ const URLS = {
     console: "https://x.mnitnetwork.com/mdashboard/console"
 };
 
-// Memory untuk mencegah duplikat saat scraping
 let LAST_PROCESSED_RANGE = new Set();
 
-/**
- * Fungsi Simpan Data ke Folder Get
- */
 function saveToGetFolder(newData) {
     try {
+        const folderPath = path.dirname(CACHE_FILE_PATH);
+        if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
         let currentCache = [];
         if (fs.existsSync(CACHE_FILE_PATH)) {
             currentCache = JSON.parse(fs.readFileSync(CACHE_FILE_PATH, 'utf-8') || "[]");
         }
-
         currentCache.unshift(newData);
         if (currentCache.length > 100) currentCache = currentCache.slice(0, 100);
-
         fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(currentCache, null, 2), 'utf-8');
-        console.log(`💾 [SAVED] ${newData.range} -> get/cache_range.json`);
-    } catch (err) {
-        console.error("❌ [FILE ERROR]:", err.message);
-    }
+        console.log(`💾 [SAVED] ${newData.range}`);
+    } catch (err) { console.error("❌ [FILE ERROR]:", err.message); }
 }
 
-/**
- * Fungsi Utama Scraper
- */
 async function startScraper() {
-    console.log("🚀 [SCRAPER] Memulai Browser...");
-    const browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({
-        viewport: { width: 1280, height: 720 }
+    console.log("🚀 [SCRAPER] Membuka Browser di layar VNC (Non-Headless)...");
+    
+    const browser = await chromium.launch({ 
+        headless: false, // WAJIB FALSE agar muncul di VNC
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-blink-features=AutomationControlled'
+        ] 
     });
+
+    const context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    });
+
     const page = await context.newPage();
 
     try {
-        // --- PROSES LOGIN ---
-        console.log(`🌐 Membuka halaman login: ${URLS.login}`);
-        await page.goto(URLS.login, { waitUntil: 'load' });
+        // 1. BUKA HALAMAN LOGIN
+        console.log(`🌐 Menuju: ${URLS.login}`);
+        await page.goto(URLS.login, { waitUntil: 'load', timeout: 60000 });
 
+        // JEDA STABILITAS (Tunggu 5 detik agar Cloudflare/Loading selesai)
+        console.log("⏳ Menunggu stabilitas browser (5 detik)...");
+        await new Promise(r => setTimeout(r, 5000));
+
+        // AMBIL SCREENSHOT UNTUK CEK APAKAH ADA CAPTCHA
+        await page.screenshot({ path: 'debug_step1.png' });
+
+        // 2. ISI EMAIL & PW
+        console.log("⌨️ Mencari input email...");
+        await page.waitForSelector("input[type='email']", { timeout: 30000 });
+        
         console.log("⌨️ Mengisi Email...");
-        await page.waitForSelector("input[type='email']");
-        await page.fill("input[type='email']", CREDENTIALS.email);
+        await page.fill("input[type='email']", CREDENTIALS.email, { delay: 100 });
+        
+        console.log("⌨️ Mengisi Password...");
+        await page.fill("input[type='password']", CREDENTIALS.pw, { delay: 100 });
 
-        console.log("⌨️ Mengisi Password dan Menekan ENTER...");
-        await page.fill("input[type='password']", CREDENTIALS.pw);
+        // 3. ENTER & TUNGGU REDIRECT
+        console.log("⌨️ Menekan ENTER...");
         await page.keyboard.press('Enter');
 
-        // Tunggu proses login (biasanya redirect ke dashboard)
-        console.log("⏳ Menunggu redirect sukses login...");
-        await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
+        console.log("⏳ Menunggu redirect login sukses (10 detik)...");
+        await new Promise(r => setTimeout(r, 10000));
+        await page.screenshot({ path: 'debug_after_login.png' });
 
-        // --- PAKSA KE CONSOLE ---
-        console.log(`🛠️ Navigasi paksa ke Console: ${URLS.console}`);
-        await page.goto(URLS.console, { waitUntil: 'networkidle' });
+        // 4. PAKSA KE CONSOLE
+        console.log(`🛠️ Navigasi Paksa ke: ${URLS.console}`);
+        await page.goto(URLS.console, { waitUntil: 'networkidle', timeout: 60000 });
 
-        // --- LOOPING SCRAPE ---
-        console.log("🔍 [MONITOR] Memulai pemantauan range...");
-        
+        // VERIFIKASI APAKAH SUDAH DI CONSOLE
+        await page.waitForSelector(".group.flex.flex-col", { timeout: 20000 });
+        console.log("✅ BERHASIL: Sudah di halaman Console.");
+
+        // 5. LOOPING SCRAPE
         while (true) {
             try {
-                // Selector baris dashboard (sesuaikan jika MNIT berubah)
-                const rowSelector = ".group.flex.flex-col.sm\\:flex-row"; 
-                const elements = await page.locator(rowSelector).all();
-
+                const elements = await page.locator(".group.flex.flex-col.sm\\:flex-row").all();
                 for (const el of elements) {
                     const phoneRaw = await el.locator(".font-mono").first().innerText().catch(() => "");
                     const countryRaw = await el.locator(".text-slate-600").innerText().catch(() => "");
@@ -91,40 +103,29 @@ async function startScraper() {
                         const service = serviceRaw.toLowerCase().includes('whatsapp') ? 'whatsapp' : 'facebook';
 
                         const cacheKey = `${cleanPhone}_${service}`;
-
                         if (!LAST_PROCESSED_RANGE.has(cacheKey)) {
-                            const dataToSave = {
+                            saveToGetFolder({
                                 range: cleanPhone,
                                 country: country,
                                 service: service,
                                 full_msg: messageRaw.trim(),
                                 detected_at: new Date().toLocaleString()
-                            };
-
-                            saveToGetFolder(dataToSave);
+                            });
                             LAST_PROCESSED_RANGE.add(cacheKey);
                         }
                     }
                 }
-
-                // Bersihkan set berkala
-                if (LAST_PROCESSED_RANGE.size > 200) LAST_PROCESSED_RANGE.clear();
-
-            } catch (e) {
-                console.log("⚠️ Scrape delay/error...");
-            }
-
-            // Cek setiap 10 detik
+            } catch (e) { console.log("⚠️ Scrape error, retrying..."); }
             await new Promise(r => setTimeout(r, 10000));
         }
 
     } catch (fatal) {
-        console.error("🔥 [FATAL] Terjadi kesalahan fatal:", fatal.message);
+        console.error("🔥 [FATAL]:", fatal.message);
+        await page.screenshot({ path: 'error_final.png' });
         await browser.close().catch(() => {});
-        console.log("🔄 Me-restart scraper dalam 10 detik...");
+        console.log("🔄 Restarting in 10s...");
         setTimeout(startScraper, 10000);
     }
 }
 
-// Jalankan
 startScraper();
