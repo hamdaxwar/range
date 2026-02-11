@@ -14,8 +14,7 @@ const URLS = {
 };
 
 let LAST_PROCESSED_RANGE = new Set();
-let browserInstance = null;
-let isLocked = false; // Flag untuk perintah /lock
+let isLocked = false; 
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
@@ -25,23 +24,21 @@ bot.on('message', async (msg) => {
     const text = msg.text;
     if (!text) return;
 
-    // Perintah LOCK: Login sekali saja, jangan restart-restart lagi
     if (text === '/lock') {
         if (isLocked) return bot.sendMessage(CHAT_ID, "⚠️ Sudah dalam mode LOCK.");
         isLocked = true;
-        await bot.sendMessage(CHAT_ID, "🔒 <b>LOCKED:</b> Login dilakukan sekali, scraper akan berjalan di background.");
+        await bot.sendMessage(CHAT_ID, "🔒 <b>LOCKED:</b> Login dilakukan sekali, scraper berjalan...");
         startScraper();
         return;
     }
 
-    // Terima Cookie
     if (text.includes('=') && text.includes(';')) {
         fs.writeFileSync(COOKIE_FILE, text.trim(), 'utf-8');
-        await bot.sendMessage(CHAT_ID, "✅ Cookie disimpan. Ketik <code>/lock</code> untuk mulai sekali jalan.");
+        await bot.sendMessage(CHAT_ID, "✅ Cookie disimpan. Ketik <code>/lock</code> untuk mulai.");
     }
 });
 
-// ==================== SIMPAN KE JSON (FOLDER GET) ====================
+// ==================== LOGIKA SIMPAN & DUPLIKAT (MAX 25) ====================
 function saveToGetFolder(newData) {
     try {
         const folderPath = path.dirname(CACHE_FILE_PATH);
@@ -49,20 +46,43 @@ function saveToGetFolder(newData) {
 
         let currentCache = [];
         if (fs.existsSync(CACHE_FILE_PATH)) {
-            currentCache = JSON.parse(fs.readFileSync(CACHE_FILE_PATH, 'utf-8'));
+            try {
+                currentCache = JSON.parse(fs.readFileSync(CACHE_FILE_PATH, 'utf-8'));
+            } catch (e) { currentCache = []; }
         }
 
-        currentCache.unshift(newData);
-        if (currentCache.length > 500) currentCache = currentCache.slice(0, 500);
+        // Cari apakah ada range yang sama
+        const existingIndex = currentCache.findIndex(item => item.range === newData.range);
+
+        if (existingIndex !== -1) {
+            // Jika range sama, cek apakah message-nya berbeda
+            if (currentCache[existingIndex].full_msg !== newData.full_msg) {
+                // Hapus data lama, masukkan yang baru di posisi paling atas
+                currentCache.splice(existingIndex, 1);
+                currentCache.unshift(newData);
+                console.log(`[UPDATE] Pesan baru untuk range: ${newData.range}`);
+            } else {
+                // Jika range dan pesan sama, tidak perlu simpan (duplikat persis)
+                return;
+            }
+        } else {
+            // Jika range benar-benar baru, masukkan ke atas
+            currentCache.unshift(newData);
+            console.log(`[NEW] Range ditambahkan: ${newData.range}`);
+        }
+
+        // Batasi maksimal 25 data (hapus yang paling lama)
+        if (currentCache.length > 25) {
+            currentCache = currentCache.slice(0, 25);
+        }
 
         fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(currentCache, null, 2));
-        console.log(`[SAVED] ${newData.range} ke cache_range.json`);
     } catch (e) {
         console.error("Gagal simpan JSON:", e.message);
     }
 }
 
-// ==================== MAIN SCRAPER (LOGIN SEKALI) ====================
+// ==================== MAIN SCRAPER ====================
 async function startScraper() {
     if (!fs.existsSync(COOKIE_FILE)) return;
 
@@ -70,7 +90,6 @@ async function startScraper() {
         headless: true, 
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'] 
     });
-    browserInstance = browser;
 
     const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
@@ -86,32 +105,34 @@ async function startScraper() {
 
         const page = await context.newPage();
         await page.goto(URLS.console, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 10000));
+        
+        // Tunggu sebentar untuk loading data dashboard
+        await page.waitForTimeout(10000);
 
         if (page.url().includes('login')) {
-            await bot.sendMessage(CHAT_ID, "❌ Login Gagal. Cookie mungkin sampah.");
+            await bot.sendMessage(CHAT_ID, "❌ Login Gagal. Cookie kadaluwarsa.");
             await browser.close();
             return;
         }
 
-        // ================= LOOP MONITORING =================
+        // Loop Monitoring
         while (true) {
-            const rowSelector = ".group.flex.flex-col.sm\\:flex-row";
-            const elements = await page.locator(rowSelector).all();
+            try {
+                const rowSelector = ".group.flex.flex-col.sm\\:flex-row";
+                const elements = await page.locator(rowSelector).all();
 
-            for (const el of elements) {
-                const phoneInfo = await el.locator(".text-slate-600.font-mono").innerText().catch(() => ""); 
-                const serviceRaw = await el.locator(".text-blue-400").innerText().catch(() => "");
-                const messageRaw = await el.locator("p.font-mono").innerText().catch(() => "");
+                for (const el of elements) {
+                    const phoneInfo = await el.locator(".text-slate-600.font-mono").innerText().catch(() => ""); 
+                    const serviceRaw = await el.locator(".text-blue-400").innerText().catch(() => "");
+                    const messageRaw = await el.locator("p.font-mono").innerText().catch(() => "");
 
-                if (serviceRaw.toLowerCase().includes('facebook') || serviceRaw.toLowerCase().includes('whatsapp')) {
-                    const splitInfo = phoneInfo.split('•').map(s => s.trim());
-                    const range = splitInfo[0] || "Unknown";
-                    const country = splitInfo[1] || "Unknown";
-                    
-                    const cacheKey = `${range}_${messageRaw.slice(-15)}`;
+                    const isTarget = serviceRaw.toLowerCase().includes('facebook') || serviceRaw.toLowerCase().includes('whatsapp');
 
-                    if (!LAST_PROCESSED_RANGE.has(cacheKey)) {
+                    if (isTarget && phoneInfo) {
+                        const splitInfo = phoneInfo.split('•').map(s => s.trim());
+                        const range = splitInfo[0] || "Unknown";
+                        const country = splitInfo[1] || "Unknown";
+                        
                         const data = {
                             range: range,
                             country: country,
@@ -120,19 +141,20 @@ async function startScraper() {
                             detected_at: new Date().toLocaleString('id-ID')
                         };
 
-                        // SIMPAN KE JSON (TIDAK KIRIM TELEGRAM)
+                        // Kirim ke fungsi pengolah cache
                         saveToGetFolder(data);
-                        LAST_PROCESSED_RANGE.add(cacheKey);
                     }
                 }
+            } catch (innerErr) {
+                console.log("Error saat scraping row:", innerErr.message);
             }
-            if (LAST_PROCESSED_RANGE.size > 1000) LAST_PROCESSED_RANGE.clear();
-            await new Promise(r => setTimeout(r, 5000));
+            
+            await page.waitForTimeout(5000); // Scan setiap 5 detik
         }
 
     } catch (err) {
         console.error("Scraper Error:", err.message);
-        // Jika error, tidak otomatis restart startScraper karena mode LOCK
+        // Tetap menyala meskipun error, atau bisa tambahkan restart logic jika perlu
     }
 }
 
