@@ -1,3 +1,6 @@
+// Menghilangkan DeprecationWarning untuk pengiriman file
+process.env.NTBA_FIX_350 = 1;
+
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
@@ -15,8 +18,19 @@ const URLS = {
 
 let LAST_PROCESSED_RANGE = new Set();
 let isLocked = false; 
+let pageInstance = null; // Menyimpan instance page agar bisa diakses /ref
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+// ==================== HELPER: HAPUS FILE OTOMATIS ====================
+function autoDelete(filePath) {
+    setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            console.log(`[CLEANUP] File dihapus: ${filePath}`);
+        }
+    }, 120000); // 2 Menit (120000 ms)
+}
 
 // ==================== TELEGRAM HANDLERS ====================
 bot.on('message', async (msg) => {
@@ -27,8 +41,22 @@ bot.on('message', async (msg) => {
     if (text === '/lock') {
         if (isLocked) return bot.sendMessage(CHAT_ID, "⚠️ Sudah dalam mode LOCK.");
         isLocked = true;
-        await bot.sendMessage(CHAT_ID, "🔒 <b>LOCKED:</b> Login dilakukan sekali, scraper berjalan...");
+        await bot.sendMessage(CHAT_ID, "🔒 <b>LOCKED:</b> Scraper berjalan di background.");
         startScraper();
+        return;
+    }
+
+    if (text === '/ref') {
+        if (!pageInstance) return bot.sendMessage(CHAT_ID, "❌ Scraper belum berjalan. Ketik /lock dulu.");
+        
+        await bot.sendMessage(CHAT_ID, "🔄 Memuat ulang halaman...");
+        await pageInstance.reload({ waitUntil: 'domcontentloaded' });
+        await new Promise(r => setTimeout(r, 3000)); // Tunggu 3 detik sesuai perintah
+
+        const refSS = `refresh_${Date.now()}.png`;
+        await pageInstance.screenshot({ path: refSS });
+        await bot.sendPhoto(CHAT_ID, refSS, { caption: "📸 Refresh Screenshot" });
+        autoDelete(refSS);
         return;
     }
 
@@ -38,7 +66,7 @@ bot.on('message', async (msg) => {
     }
 });
 
-// ==================== LOGIKA SIMPAN & DUPLIKAT (MAX 25) ====================
+// ==================== SIMPAN KE JSON (CEK DUPLIKAT & MAX 25) ====================
 function saveToGetFolder(newData) {
     try {
         const folderPath = path.dirname(CACHE_FILE_PATH);
@@ -51,27 +79,22 @@ function saveToGetFolder(newData) {
             } catch (e) { currentCache = []; }
         }
 
-        // Cari apakah ada range yang sama
+        // Cari duplikat berdasarkan range
         const existingIndex = currentCache.findIndex(item => item.range === newData.range);
 
         if (existingIndex !== -1) {
-            // Jika range sama, cek apakah pesannya berbeda
+            // Jika range sama tapi message beda, ganti yang lama
             if (currentCache[existingIndex].full_msg !== newData.full_msg) {
-                // Pesan beda: Hapus data lama (agar yang baru masuk ke urutan paling atas)
                 currentCache.splice(existingIndex, 1);
                 currentCache.unshift(newData);
-                console.log(`[UPDATE] Range ${newData.range} diperbarui.`);
             } else {
-                // Pesan sama: Abaikan agar tidak duplikat
-                return;
+                return; // Sama persis, abaikan
             }
         } else {
-            // Range benar-benar baru: Masukkan ke paling atas
             currentCache.unshift(newData);
-            console.log(`[NEW] Range ditambahkan: ${newData.range}`);
         }
 
-        // Batasi maksimal 25 data (hapus yang paling lama)
+        // Batasi maksimal 25 data
         if (currentCache.length > 25) {
             currentCache = currentCache.slice(0, 25);
         }
@@ -92,7 +115,6 @@ async function startScraper() {
     });
 
     const context = await browser.newContext({
-        viewport: { width: 1280, height: 800 },
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     });
 
@@ -105,23 +127,22 @@ async function startScraper() {
         await context.addCookies(cookies);
 
         const page = await context.newPage();
-        await page.goto(URLS.console, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        pageInstance = page; // Simpan ke global variable untuk /ref
         
-        // Tunggu proses login/dashboard rendering
-        await new Promise(r => setTimeout(r, 12000));
+        await page.goto(URLS.console, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await new Promise(r => setTimeout(r, 10000));
 
         if (page.url().includes('login')) {
-            await bot.sendMessage(CHAT_ID, "❌ Login Gagal. Cookie mungkin sampah.");
+            await bot.sendMessage(CHAT_ID, "❌ Login Gagal. Cookie sampah.");
             await browser.close();
-            isLocked = false;
             return;
         }
 
-        // --- FITUR SCREENSHOT ---
-        const ssPath = 'login_success.png';
-        await page.screenshot({ path: ssPath, fullPage: false });
-        await bot.sendPhoto(CHAT_ID, ssPath, { caption: "✅ Berhasil Login ke Console!" });
-        if (fs.existsSync(ssPath)) fs.unlinkSync(ssPath); // Hapus file lokal setelah kirim
+        // Screenshot Login Berhasil
+        const loginSS = `login_${Date.now()}.png`;
+        await page.screenshot({ path: loginSS });
+        await bot.sendPhoto(CHAT_ID, loginSS, { caption: "✅ Berhasil Login!" });
+        autoDelete(loginSS);
 
         // ================= LOOP MONITORING =================
         while (true) {
@@ -139,30 +160,30 @@ async function startScraper() {
                         const range = splitInfo[0] || "Unknown";
                         const country = splitInfo[1] || "Unknown";
                         
-                        const data = {
-                            range: range,
-                            country: country,
-                            service: serviceRaw,
-                            full_msg: messageRaw.replace('➜', '').trim(),
-                            detected_at: new Date().toLocaleString('id-ID')
-                        };
+                        const cacheKey = `${range}_${messageRaw.slice(-15)}`;
 
-                        // Kirim ke pengolah cache logic (Cek Duplikat & Limit 25)
-                        saveToGetFolder(data);
+                        if (!LAST_PROCESSED_RANGE.has(cacheKey)) {
+                            const data = {
+                                range: range,
+                                country: country,
+                                service: serviceRaw,
+                                full_msg: messageRaw.replace('➜', '').trim(),
+                                detected_at: new Date().toLocaleString('id-ID')
+                            };
+
+                            saveToGetFolder(data);
+                            LAST_PROCESSED_RANGE.add(cacheKey);
+                        }
                     }
                 }
-            } catch (loopErr) {
-                console.error("Error dalam loop:", loopErr.message);
-            }
-            
+                if (LAST_PROCESSED_RANGE.size > 1000) LAST_PROCESSED_RANGE.clear();
+            } catch (e) { console.log("Loop Error Terlewati."); }
+
             await new Promise(r => setTimeout(r, 5000));
         }
 
     } catch (err) {
-        console.error("Scraper Fatal Error:", err.message);
-        await bot.sendMessage(CHAT_ID, `⚠️ Scraper terhenti: ${err.message}`);
-        isLocked = false;
-        await browser.close();
+        console.error("Scraper Error:", err.message);
     }
 }
 
