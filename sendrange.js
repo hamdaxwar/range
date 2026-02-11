@@ -11,7 +11,6 @@ const CHAT_ID = "7184123643";
 const COOKIE_FILE = path.join(__dirname, 'active_session.json');
 
 const URLS = {
-    base: "https://x.mnitnetwork.com",
     console: "https://x.mnitnetwork.com/mdashboard/console"
 };
 
@@ -51,20 +50,29 @@ function saveToGetFolder(newData) {
 
 // ==================== MAIN SCRAPER ====================
 async function startScraper() {
-    // Jika file cookie belum ada, bot akan stand-by
+    // --- STANDBY MODE: CEK FILE COOKIE ---
     if (!fs.existsSync(COOKIE_FILE)) {
-        console.log("❌ Cookie belum ada. Silahkan buat file active_session.json");
-        await sendTelegramMsg("<b>[WAKE UP]</b> Bot Scraper aktif, tapi Cookie belum ada.\n\nKirim token mauthtoken kamu ke sini.");
-        return;
+        console.log("⏳ [WAITING] File active_session.json tidak ditemukan.");
+        console.log("💡 Silahkan buat filenya sekarang di VPS...");
+        
+        // Kirim notif ke telegram hanya sekali tiap restart
+        if (!global.sentWaitNotif) {
+            await sendTelegramMsg("<b>[STANDBY]</b> File <code>active_session.json</code> belum ada.\n\nSegera buat filenya di VPS agar bot bisa lanjut login!");
+            global.sentWaitNotif = true;
+        }
+
+        // Cek lagi setiap 5 detik (Looping tanpa browser)
+        return setTimeout(startScraper, 5000);
     }
 
-    console.log("🚀 [SCRAPER] Memulai dengan Cookie Injection...");
-    const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+    console.log("🚀 [SCRAPER] Cookie ditemukan! Memulai Browser...");
+    const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     const context = await browser.newContext();
     
     try {
-        // Load Cookie dari file
         const cookieVal = fs.readFileSync(COOKIE_FILE, 'utf-8').trim();
+        
+        // Inject Cookie mauthtoken
         await context.addCookies([{
             name: 'mauthtoken',
             value: cookieVal,
@@ -77,51 +85,55 @@ async function startScraper() {
 
         const page = await context.newPage();
         
-        console.log("🛠️ Langsung menuju Console...");
-        await page.goto(URLS.console, { waitUntil: 'networkidle', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 5000));
+        console.log("🛠️ Navigasi ke Console...");
+        await page.goto(URLS.console, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await new Promise(r => setTimeout(r, 7000));
 
-        // Cek apakah berhasil masuk atau terpental ke login
+        // Verifikasi apakah sesi valid
         if (page.url().includes('login')) {
-            await page.screenshot({ path: 'session_expired.png' });
-            await sendTelegramPhoto("❌ <b>Cookie Expired!</b> Silahkan kirim cookie baru.", 'session_expired.png');
+            console.log("❌ Sesi tidak valid / expired.");
+            await page.screenshot({ path: 'expired.png' });
+            await sendTelegramPhoto("❌ <b>Cookie Expired!</b>\nSilahkan update file active_session.json dengan token baru.", 'expired.png');
+            
+            // Hapus file cookie yang sudah expired agar bot balik ke Standby Mode
+            fs.unlinkSync(COOKIE_FILE); 
+            global.sentWaitNotif = false;
             await browser.close();
-            return;
+            return setTimeout(startScraper, 5000);
         }
 
-        await sendTelegramMsg("✅ <b>Login Berhasil via Cookie!</b> Monitoring dimulai...");
+        await sendTelegramMsg("✅ <b>Login Berhasil!</b> Monitoring sedang berjalan...");
 
+        // Loop Monitoring Data
         while (true) {
-            try {
-                const elements = await page.locator(".group.flex.flex-col.sm\\:flex-row").all();
-                for (const el of elements) {
-                    const phoneRaw = await el.locator(".font-mono").first().innerText().catch(() => "");
-                    const serviceRaw = await el.locator(".text-blue-400").innerText().catch(() => "");
-                    const messageRaw = await el.locator("p").innerText().catch(() => "");
+            const elements = await page.locator(".group.flex.flex-col.sm\\:flex-row").all();
+            for (const el of elements) {
+                const phoneRaw = await el.locator(".font-mono").first().innerText().catch(() => "");
+                const serviceRaw = await el.locator(".text-blue-400").innerText().catch(() => "");
+                const messageRaw = await el.locator("p").innerText().catch(() => "");
 
-                    if (phoneRaw.includes('XXX')) {
-                        const cleanPhone = phoneRaw.trim();
-                        const cacheKey = `${cleanPhone}_${serviceRaw}`;
-                        if (!LAST_PROCESSED_RANGE.has(cacheKey)) {
-                            saveToGetFolder({
-                                range: cleanPhone,
-                                service: serviceRaw.toLowerCase().includes('whatsapp') ? 'whatsapp' : 'facebook',
-                                full_msg: messageRaw.trim(),
-                                detected_at: new Date().toLocaleString('id-ID')
-                            });
-                            LAST_PROCESSED_RANGE.add(cacheKey);
-                            console.log(`✨ Detected: ${cleanPhone}`);
-                        }
+                if (phoneRaw.includes('XXX')) {
+                    const cleanPhone = phoneRaw.trim();
+                    const cacheKey = `${cleanPhone}_${serviceRaw}`;
+                    if (!LAST_PROCESSED_RANGE.has(cacheKey)) {
+                        saveToGetFolder({
+                            range: cleanPhone,
+                            service: serviceRaw.toLowerCase().includes('whatsapp') ? 'whatsapp' : 'facebook',
+                            full_msg: messageRaw.trim(),
+                            detected_at: new Date().toLocaleString('id-ID')
+                        });
+                        LAST_PROCESSED_RANGE.add(cacheKey);
+                        console.log(`✨ Detected: ${cleanPhone}`);
                     }
                 }
-            } catch (e) {}
+            }
             await new Promise(r => setTimeout(r, 15000));
         }
 
     } catch (err) {
-        console.error("🔥 Fatal Error:", err.message);
+        console.error("🔥 Error:", err.message);
         await browser.close().catch(() => {});
-        setTimeout(startScraper, 30000);
+        setTimeout(startScraper, 10000);
     }
 }
 
