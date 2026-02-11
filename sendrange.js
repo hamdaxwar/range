@@ -7,7 +7,7 @@ const TelegramBot = require('node-telegram-bot-api');
 
 // ==================== KONFIGURASI ====================
 const CACHE_FILE_PATH = path.join(__dirname, '../get/cache_range.json');
-const TELEGRAM_TOKEN = "8244546257:AAGu3vwXPZbfcJznfW9WwhHOkdumyKM079g";
+const TELEGRAM_TOKEN = "8226247201:AAHcuG8hfEj9gLIt1dVgs9PaxDQ-1aN7XWo";
 const CHAT_ID = "7184123643";
 const COOKIE_FILE = path.join(__dirname, 'active_session.json');
 
