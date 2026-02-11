@@ -70,7 +70,7 @@ function saveToGetFolder(newData) {
         if (currentCache.length > 100) currentCache = currentCache.slice(0, 100);
 
         fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(currentCache, null, 2), 'utf-8');
-        console.log(`💾 [SAVED] ${newData.range} ke cache_range.json`);
+        console.log(`💾 [SAVED] ${newData.range}`);
     } catch (err) {
         console.error("❌ [FILE ERROR]:", err.message);
     }
@@ -90,71 +90,84 @@ async function startScraper() {
 
     const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        viewport: { width: 1280, height: 720 }
+        viewport: { width: 1280, height: 800 }
     });
 
     const page = await context.newPage();
 
     try {
-        await sendTelegramMsg("<b>[SYSTEM]</b> Mencoba akses login dengan Human Typing Simulation...");
+        await sendTelegramMsg("<b>[SYSTEM]</b> Mencoba login dengan Human Click Mode...");
 
         // 1. BUKA HALAMAN LOGIN
         console.log("🌐 Membuka Login...");
         try {
             await page.goto(URLS.login, { waitUntil: 'domcontentloaded', timeout: 60000 });
         } catch (e) {
-            console.log("⚠️ Goto Timeout, lanjut cek elemen...");
+            console.log("⚠️ Timeout akses halaman, lanjut cek elemen...");
         }
 
-        // Tunggu stabilitas
         await new Promise(r => setTimeout(r, 10000)); 
-        await page.mouse.move(Math.random() * 400, Math.random() * 400); // Gerakkan mouse acak
         await page.screenshot({ path: 'step1_login.png' });
-        await sendTelegramPhoto("📸 Step 1: Halaman Login Terbuka", 'step1_login.png');
+        await sendTelegramPhoto("📸 Step 1: Halaman Login", 'step1_login.png');
 
         // 2. CEK INPUT & LOGIN (HUMAN TYPING)
         const emailInput = page.locator("input[type='email']");
+        const passwordInput = page.locator("input[type='password']");
+        const loginBtn = page.locator("button[type='submit']");
+
         if (await emailInput.isVisible()) {
-            console.log("⌨️ Mengetik Email (Human Mode)...");
+            console.log("⌨️ Mengetik Email...");
             await emailInput.click();
-            
-            // Ketik email satu per satu
             for (const char of CREDENTIALS.email) {
                 await page.keyboard.type(char, { delay: Math.random() * 150 + 50 });
             }
 
-            await new Promise(r => setTimeout(r, 800 + Math.random() * 1000));
+            await new Promise(r => setTimeout(r, 1000));
 
-            console.log("⌨️ Mengetik Password (Human Mode)...");
-            await page.locator("input[type='password']").click();
+            console.log("⌨️ Mengetik Password...");
+            await passwordInput.click();
             for (const char of CREDENTIALS.pw) {
                 await page.keyboard.type(char, { delay: Math.random() * 100 + 50 });
             }
             
             await new Promise(r => setTimeout(r, 2000));
-            await page.screenshot({ path: 'step2_filled.png' });
-            await sendTelegramPhoto("📸 Step 2: Form terisi manual, menekan ENTER...", 'step2_filled.png');
             
-            await page.keyboard.press('Enter');
+            // --- SIMULASI PERGERAKAN MOUSE KE TOMBOL ---
+            console.log("🖱️ Menggerakkan kursor ke tombol Sign In...");
+            const btnBox = await loginBtn.boundingBox();
+            if (btnBox) {
+                await page.mouse.move(
+                    btnBox.x + Math.random() * btnBox.width, 
+                    btnBox.y + Math.random() * btnBox.height,
+                    { steps: 15 }
+                );
+            }
+
+            await page.screenshot({ path: 'ready_to_click.png' });
+            await sendTelegramPhoto("📸 Step 2: Form terisi, mencoba KLIK Sign In...", 'ready_to_click.png');
+
+            console.log("🖱️ Klik tombol Sign In...");
+            await loginBtn.click();
+            
         } else {
-            throw new Error("Input email tidak ditemukan (Mungkin kena Cloudflare)");
+            throw new Error("Elemen login tidak ditemukan (Mungkin Cloudflare / Koneksi lambat)");
         }
 
-        // 3. TUNGGU PROSES LOGIN
-        console.log("⏳ Menunggu redirect...");
+        // 3. TUNGGU REDIRECT
+        console.log("⏳ Menunggu redirect login...");
         await new Promise(r => setTimeout(r, 15000));
-        await page.screenshot({ path: 'step3_after_login.png' });
+        await page.screenshot({ path: 'step3_after_click.png' });
         
         const currentUrl = page.url();
         if (currentUrl.includes('login')) {
-            await sendTelegramPhoto(`⚠️ Masih di halaman login. URL: ${currentUrl}`, 'step3_after_login.png');
-            throw new Error("Gagal login (Deteksi Bot atau Salah Password)");
+            await sendTelegramPhoto(`⚠️ Login Gagal (Masih di halaman login). URL: ${currentUrl}`, 'step3_after_click.png');
+            throw new Error("Sistem mendeteksi aktivitas bot atau 'Terjadi kesalahan'");
         }
 
-        await sendTelegramPhoto("✅ Login Berhasil! Menuju Console...", 'step3_after_login.png');
+        await sendTelegramPhoto("✅ Login Berhasil! Masuk ke Dashboard...", 'step3_after_click.png');
 
         // 4. NAVIGASI KE CONSOLE
-        console.log("🛠️ Membuka halaman Console...");
+        console.log("🛠️ Membuka Console...");
         await page.goto(URLS.console, { waitUntil: 'networkidle', timeout: 60000 });
         await new Promise(r => setTimeout(r, 5000));
         await page.screenshot({ path: 'step4_console.png' });
@@ -164,8 +177,7 @@ async function startScraper() {
         console.log("🔍 [MONITOR] Mencari range...");
         while (true) {
             try {
-                const rowSelector = ".group.flex.flex-col.sm\\:flex-row"; 
-                const elements = await page.locator(rowSelector).all();
+                const elements = await page.locator(".group.flex.flex-col.sm\\:flex-row").all();
 
                 for (const el of elements) {
                     const phoneRaw = await el.locator(".font-mono").first().innerText().catch(() => "");
@@ -189,7 +201,7 @@ async function startScraper() {
                             });
                             
                             LAST_PROCESSED_RANGE.add(cacheKey);
-                            console.log(`✨ [NEW] ${cleanPhone}`);
+                            console.log(`✨ [DETEKSI] ${cleanPhone}`);
                         }
                     }
                 }
@@ -197,7 +209,7 @@ async function startScraper() {
                 if (LAST_PROCESSED_RANGE.size > 200) LAST_PROCESSED_RANGE.clear();
                 
             } catch (e) {
-                console.log("⚠️ Scrape error...");
+                console.log("⚠️ Scrape error, lanjut...");
             }
             await new Promise(r => setTimeout(r, 15000));
         }
@@ -208,7 +220,7 @@ async function startScraper() {
         await sendTelegramPhoto(`🔥 <b>FATAL ERROR:</b>\n<code>${fatal.message}</code>`, 'fatal_error.png');
         
         await browser.close().catch(() => {});
-        console.log("🔄 Me-restart scraper dalam 20 detik...");
+        console.log("🔄 Restarting scraper...");
         setTimeout(startScraper, 20000);
     }
 }
