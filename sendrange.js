@@ -1,8 +1,13 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
+const FormData = require('form-data');
 
+// ==================== KONFIGURASI ====================
 const CACHE_FILE_PATH = path.join(__dirname, '../get/cache_range.json');
+const TELEGRAM_TOKEN = "8244546257:AAGu3vwXPZbfcJznfW9WwhHOkdumyKM079g";
+const CHAT_ID = "7184123643";
 
 const CREDENTIALS = {
     email: "muhamadreyhan0073@gmail.com",
@@ -16,6 +21,32 @@ const URLS = {
 
 let LAST_PROCESSED_RANGE = new Set();
 
+// ==================== FUNGSI TELEGRAM ====================
+async function sendTelegramPhoto(caption, photoPath) {
+    try {
+        const form = new FormData();
+        form.append('chat_id', CHAT_ID);
+        form.append('caption', caption);
+        form.append('photo', fs.createReadStream(photoPath));
+
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendPhoto`, form, {
+            headers: form.getHeaders()
+        });
+    } catch (e) {
+        console.error("❌ Gagal kirim Telegram:", e.message);
+    }
+}
+
+async function sendTelegramMsg(text) {
+    try {
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+            chat_id: CHAT_ID,
+            text: text
+        });
+    } catch (e) {}
+}
+
+// ==================== LOGIK PENYIMPANAN ====================
 function saveToGetFolder(newData) {
     try {
         const folderPath = path.dirname(CACHE_FILE_PATH);
@@ -27,104 +58,93 @@ function saveToGetFolder(newData) {
         currentCache.unshift(newData);
         if (currentCache.length > 100) currentCache = currentCache.slice(0, 100);
         fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(currentCache, null, 2), 'utf-8');
-        console.log(`💾 [SAVED] ${newData.range}`);
     } catch (err) { console.error("❌ [FILE ERROR]:", err.message); }
 }
 
+// ==================== MAIN SCRAPER ====================
 async function startScraper() {
-    console.log("🚀 [SCRAPER] Membuka Browser di layar VNC (Non-Headless)...");
-    
+    console.log("🚀 [SCRAPER] Memulai Browser...");
     const browser = await chromium.launch({ 
-        headless: true, // WAJIB FALSE agar muncul di VNC
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox',
-            '--disable-blink-features=AutomationControlled'
-        ] 
+        headless: true, 
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'] 
     });
-
     const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     });
-
     const page = await context.newPage();
 
     try {
+        await sendTelegramMsg("🚀 Scraper MNIT Dimulai...");
+
         // 1. BUKA HALAMAN LOGIN
-        console.log(`🌐 Menuju: ${URLS.login}`);
-        await page.goto(URLS.login, { waitUntil: 'load', timeout: 60000 });
-
-        // JEDA STABILITAS (Tunggu 5 detik agar Cloudflare/Loading selesai)
-        console.log("⏳ Menunggu stabilitas browser (5 detik)...");
-        await new Promise(r => setTimeout(r, 5000));
-
-        // AMBIL SCREENSHOT UNTUK CEK APAKAH ADA CAPTCHA
-        await page.screenshot({ path: 'debug_step1.png' });
-
-        // 2. ISI EMAIL & PW
-        console.log("⌨️ Mencari input email...");
-        await page.waitForSelector("input[type='email']", { timeout: 30000 });
+        console.log("🌐 Membuka Login...");
+        await page.goto(URLS.login, { waitUntil: 'networkidle', timeout: 60000 });
+        await new Promise(r => setTimeout(r, 5000)); // Tunggu stabilitas
         
-        console.log("⌨️ Mengisi Email...");
-        await page.fill("input[type='email']", CREDENTIALS.email, { delay: 100 });
-        
-        console.log("⌨️ Mengisi Password...");
-        await page.fill("input[type='password']", CREDENTIALS.pw, { delay: 100 });
+        await page.screenshot({ path: 'login_page.png' });
+        await sendTelegramPhoto("📸 Status: Halaman Login Terbuka", 'login_page.png');
 
-        // 3. ENTER & TUNGGU REDIRECT
-        console.log("⌨️ Menekan ENTER...");
+        // 2. ISI FORM
+        console.log("⌨️ Mengisi data login...");
+        await page.fill("input[type='email']", CREDENTIALS.email);
+        await page.fill("input[type='password']", CREDENTIALS.pw);
         await page.keyboard.press('Enter');
 
-        console.log("⏳ Menunggu redirect login sukses (10 detik)...");
+        // 3. TUNGGU REDIRECT
+        console.log("⏳ Menunggu redirect...");
         await new Promise(r => setTimeout(r, 10000));
-        await page.screenshot({ path: 'debug_after_login.png' });
+        
+        await page.screenshot({ path: 'after_login.png' });
+        
+        if (page.url().includes('login')) {
+            await sendTelegramPhoto("⚠️ Gagal Login / Stuck di Login", 'after_login.png');
+            throw new Error("Login gagal atau diblokir Cloudflare.");
+        }
 
-        // 4. PAKSA KE CONSOLE
-        console.log(`🛠️ Navigasi Paksa ke: ${URLS.console}`);
-        await page.goto(URLS.console, { waitUntil: 'networkidle', timeout: 60000 });
+        await sendTelegramPhoto("✅ Berhasil Login! Menuju Console...", 'after_login.png');
 
-        // VERIFIKASI APAKAH SUDAH DI CONSOLE
-        await page.waitForSelector(".group.flex.flex-col", { timeout: 20000 });
-        console.log("✅ BERHASIL: Sudah di halaman Console.");
+        // 4. NAVIGASI KE CONSOLE
+        await page.goto(URLS.console, { waitUntil: 'networkidle' });
+        await new Promise(r => setTimeout(r, 5000));
+        await page.screenshot({ path: 'console_view.png' });
+        await sendTelegramPhoto("📊 Monitoring Console Aktif", 'console_view.png');
 
-        // 5. LOOPING SCRAPE
+        // 5. LOOP MONITORING
         while (true) {
-            try {
-                const elements = await page.locator(".group.flex.flex-col.sm\\:flex-row").all();
-                for (const el of elements) {
-                    const phoneRaw = await el.locator(".font-mono").first().innerText().catch(() => "");
-                    const countryRaw = await el.locator(".text-slate-600").innerText().catch(() => "");
-                    const serviceRaw = await el.locator(".text-blue-400").innerText().catch(() => "");
-                    const messageRaw = await el.locator("p").innerText().catch(() => "");
+            const elements = await page.locator(".group.flex.flex-col.sm\\:flex-row").all();
+            for (const el of elements) {
+                const phoneRaw = await el.locator(".font-mono").first().innerText().catch(() => "");
+                const countryRaw = await el.locator(".text-slate-600").innerText().catch(() => "");
+                const serviceRaw = await el.locator(".text-blue-400").innerText().catch(() => "");
+                const messageRaw = await el.locator("p").innerText().catch(() => "");
 
-                    if (phoneRaw.includes('XXX')) {
-                        const cleanPhone = phoneRaw.trim();
+                if (phoneRaw.includes('XXX')) {
+                    const cleanPhone = phoneRaw.trim();
+                    const cacheKey = `${cleanPhone}_${serviceRaw}`;
+
+                    if (!LAST_PROCESSED_RANGE.has(cacheKey)) {
                         const country = countryRaw.includes('•') ? countryRaw.split('•')[1].trim() : countryRaw.trim();
-                        const service = serviceRaw.toLowerCase().includes('whatsapp') ? 'whatsapp' : 'facebook';
-
-                        const cacheKey = `${cleanPhone}_${service}`;
-                        if (!LAST_PROCESSED_RANGE.has(cacheKey)) {
-                            saveToGetFolder({
-                                range: cleanPhone,
-                                country: country,
-                                service: service,
-                                full_msg: messageRaw.trim(),
-                                detected_at: new Date().toLocaleString()
-                            });
-                            LAST_PROCESSED_RANGE.add(cacheKey);
-                        }
+                        saveToGetFolder({
+                            range: cleanPhone,
+                            country: country,
+                            service: serviceRaw.toLowerCase().includes('whatsapp') ? 'whatsapp' : 'facebook',
+                            full_msg: messageRaw.trim(),
+                            detected_at: new Date().toLocaleString()
+                        });
+                        LAST_PROCESSED_RANGE.add(cacheKey);
+                        console.log(`💾 [DETECTED] ${cleanPhone}`);
                     }
                 }
-            } catch (e) { console.log("⚠️ Scrape error, retrying..."); }
-            await new Promise(r => setTimeout(r, 10000));
+            }
+            await new Promise(r => setTimeout(r, 15000));
         }
 
     } catch (fatal) {
-        console.error("🔥 [FATAL]:", fatal.message);
-        await page.screenshot({ path: 'error_final.png' });
+        console.error("🔥 Error:", fatal.message);
+        await page.screenshot({ path: 'error_log.png' });
+        await sendTelegramPhoto(`🔥 FATAL ERROR: ${fatal.message}`, 'error_log.png');
         await browser.close().catch(() => {});
-        console.log("🔄 Restarting in 10s...");
-        setTimeout(startScraper, 10000);
+        setTimeout(startScraper, 15000);
     }
 }
 
