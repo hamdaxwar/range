@@ -35,7 +35,7 @@ async function startScraper() {
     console.log("🚀 [SCRAPER] Membuka Browser di layar VNC (Non-Headless)...");
     
     const browser = await chromium.launch({ 
-        headless: false, // WAJIB FALSE agar muncul di VNC
+        headless: true, // WAJIB FALSE agar muncul di VNC
         args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox',
