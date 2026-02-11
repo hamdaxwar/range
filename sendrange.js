@@ -18,6 +18,7 @@ const URLS = {
 
 let LAST_PROCESSED_RANGE = new Set();
 let isBrowserRunning = false;
+let browserInstance = null;
 
 // ==================== INIT TELEGRAM BOT ====================
 const bot = new TelegramBot(TELEGRAM_TOKEN, { 
@@ -61,32 +62,51 @@ async function notifyBotStart() {
     const msg = `
 🤖 <b>BOT AKTIF</b>
 
-Silahkan kirim token disini untuk menyimpan dan melakukan login.
+Silahkan kirim COOKIE disini untuk login.
+(Contoh: mauthtoken=xxx; twk_idm_key=xxx; ...)
 `;
     await sendMsg(msg);
 }
 
-// ==================== LISTENER TOKEN TELEGRAM ====================
+// ==================== PARSE COOKIE STRING ====================
+function parseCookies(cookieString, domain) {
+    return cookieString.split(';').map(item => {
+        const [name, ...rest] = item.trim().split('=');
+        return {
+            name: name,
+            value: rest.join('='),
+            domain: domain,
+            path: '/',
+            httpOnly: false,
+            secure: true
+        };
+    });
+}
+
+// ==================== LISTENER COOKIE TELEGRAM ====================
 bot.on('message', async (msg) => {
     if (msg.chat.id.toString() !== CHAT_ID) return;
 
     const text = msg.text;
-
     if (!text) return;
 
-    // token biasanya JWT diawali eyJ
-    if (text.startsWith('eyJ')) {
+    // deteksi cookie full (ada "=" dan ";")
+    if (text.includes('=') && text.includes(';')) {
 
-        // simpan token ke file
+        // simpan cookie full
         fs.writeFileSync(COOKIE_FILE, text.trim(), 'utf-8');
 
-        await sendMsg("✅ <b>Token diterima</b>\n📁 File diperbarui/dibuat\n🚀 Melakukan login...");
+        await sendMsg("✅ <b>Cookie diterima!</b>\n📁 File diperbarui\n🚀 Login dimulai...");
 
-        if (!isBrowserRunning) {
-            startScraper();
-        } else {
-            await sendMsg("⚠️ Browser masih berjalan, token akan dipakai saat restart.");
+        // kalau browser masih hidup → restart
+        if (browserInstance) {
+            try {
+                await browserInstance.close();
+            } catch {}
+            isBrowserRunning = false;
         }
+
+        startScraper();
     }
 });
 
@@ -110,10 +130,10 @@ function saveToGetFolder(newData) {
     fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(currentCache, null, 2));
 }
 
-// ==================== MAIN SCRAPER ====================
+// ==================== MAIN SCRAPER (LOGIN COOKIE) ====================
 async function startScraper() {
     if (!fs.existsSync(COOKIE_FILE)) {
-        console.log("⏳ Menunggu token...");
+        console.log("⏳ Menunggu cookie...");
         return;
     }
 
@@ -128,21 +148,21 @@ async function startScraper() {
         ] 
     });
 
+    browserInstance = browser;
+
     const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     });
 
     try {
-        const cookieVal = fs.readFileSync(COOKIE_FILE, 'utf-8').trim();
-        await context.addCookies([{
-            name: 'mauthtoken',
-            value: cookieVal,
-            domain: 'x.mnitnetwork.com',
-            path: '/',
-            httpOnly: true,
-            secure: true,
-            sameSite: 'Lax'
-        }]);
+        // baca cookie full
+        const rawCookie = fs.readFileSync(COOKIE_FILE, 'utf-8').trim();
+
+        // parse cookie → array
+        const cookies = parseCookies(rawCookie, "x.mnitnetwork.com");
+
+        // inject semua cookie
+        await context.addCookies(cookies);
 
         const page = await context.newPage();
         await page.goto(URLS.console, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -153,9 +173,9 @@ async function startScraper() {
         const screenshotPath = 'login_result.png';
         await page.screenshot({ path: screenshotPath });
 
+        // cek login gagal
         if (currentUrl.includes('login')) {
-            await sendPhoto("❌ <b>Login gagal!</b>\nToken expired atau invalid.", screenshotPath);
-            fs.unlinkSync(COOKIE_FILE);
+            await sendPhoto("❌ <b>Login gagal!</b>\nCookie expired / invalid.", screenshotPath);
             isBrowserRunning = false;
             await browser.close();
             return;
