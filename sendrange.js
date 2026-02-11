@@ -56,18 +56,14 @@ async function sendPhoto(caption, photoPath) {
     }
 }
 
-// ==================== NOTIFY BOT START ====================
+// ==================== PESAN AWAL BOT ====================
 async function notifyBotStart() {
-    const info = `
+    const msg = `
 🤖 <b>BOT AKTIF</b>
 
-🖥 Host: ${os.hostname()}
-⚙️ Node: ${process.version}
-💾 RAM: ${(os.totalmem() / 1024 / 1024 / 1024).toFixed(2)} GB
-
-Status: Standby menunggu token...
+Silahkan kirim token disini untuk menyimpan dan melakukan login.
 `;
-    await sendMsg(info);
+    await sendMsg(msg);
 }
 
 // ==================== LISTENER TOKEN TELEGRAM ====================
@@ -75,14 +71,21 @@ bot.on('message', async (msg) => {
     if (msg.chat.id.toString() !== CHAT_ID) return;
 
     const text = msg.text;
-    if (text && text.startsWith('eyJ')) {
+
+    if (!text) return;
+
+    // token biasanya JWT diawali eyJ
+    if (text.startsWith('eyJ')) {
+
+        // simpan token ke file
         fs.writeFileSync(COOKIE_FILE, text.trim(), 'utf-8');
-        await bot.sendMessage(CHAT_ID, "✅ <b>Token Diterima!</b> Menyiapkan sistem...");
+
+        await sendMsg("✅ <b>Token diterima</b>\n📁 File diperbarui/dibuat\n🚀 Melakukan login...");
 
         if (!isBrowserRunning) {
             startScraper();
         } else {
-            await bot.sendMessage(CHAT_ID, "⚠️ Browser sedang berjalan, token akan dipakai saat restart.");
+            await sendMsg("⚠️ Browser masih berjalan, token akan dipakai saat restart.");
         }
     }
 });
@@ -110,15 +113,11 @@ function saveToGetFolder(newData) {
 // ==================== MAIN SCRAPER ====================
 async function startScraper() {
     if (!fs.existsSync(COOKIE_FILE)) {
-        console.log("⏳ Menunggu mauthtoken dari Telegram...");
+        console.log("⏳ Menunggu token...");
         return;
     }
 
     isBrowserRunning = true;
-    await sendMsg("🚀 <b>Bot Dimulai!</b> Menghubungkan ke server...");
-
-    console.log("🚀 Membuka Chromium...");
-    await sendMsg("🌐 <b>Membuka Chromium...</b>");
 
     const browser = await chromium.launch({ 
         headless: true, 
@@ -146,7 +145,6 @@ async function startScraper() {
         }]);
 
         const page = await context.newPage();
-        console.log("🛠️ Navigasi ke Console...");
         await page.goto(URLS.console, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
         await new Promise(r => setTimeout(r, 10000));
@@ -156,15 +154,14 @@ async function startScraper() {
         await page.screenshot({ path: screenshotPath });
 
         if (currentUrl.includes('login')) {
-            console.log("❌ Login gagal / token expired.");
-            await sendPhoto("❌ <b>Gagal Login!</b> Token expired atau invalid.", screenshotPath);
+            await sendPhoto("❌ <b>Login gagal!</b>\nToken expired atau invalid.", screenshotPath);
             fs.unlinkSync(COOKIE_FILE);
             isBrowserRunning = false;
             await browser.close();
             return;
         }
 
-        await sendPhoto("✅ <b>Login Berhasil!</b> Monitoring dimulai.", screenshotPath);
+        await sendPhoto("✅ <b>Login berhasil!</b>\nMonitoring dimulai.", screenshotPath);
 
         // ================= LOOP MONITORING =================
         while (true) {
@@ -191,7 +188,6 @@ async function startScraper() {
                         saveToGetFolder(data);
                         LAST_PROCESSED_RANGE.add(cacheKey);
 
-                        console.log(`✨ Detected: ${cleanPhone}`);
                         await sendMsg(`✨ <b>RANGE TERDETEKSI</b>\n\n📱 ${cleanPhone}\n⚙️ ${data.service}`);
                     }
                 }
@@ -202,9 +198,7 @@ async function startScraper() {
         }
 
     } catch (err) {
-        console.error("🔥 Error:", err.message);
-        await sendMsg(`🔥 <b>Error Sistem:</b>\n<code>${err.message}</code>\nRestart browser...`);
-
+        await sendMsg(`🔥 <b>Error Sistem:</b>\n<code>${err.message}</code>\nRestart...`);
         isBrowserRunning = false;
         await browser.close().catch(() => {});
         setTimeout(startScraper, 10000);
@@ -214,6 +208,6 @@ async function startScraper() {
 // ==================== START BOT ====================
 (async () => {
     console.log("🤖 Bot Standby...");
-    await notifyBotStart(); // kirim pesan saat bot pertama run
+    await notifyBotStart();
     startScraper();
 })();
