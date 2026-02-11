@@ -15,18 +15,17 @@ const URLS = {
     console: "https://x.mnitnetwork.com/mdashboard/console"
 };
 
-let isMonitoring = false;
+let LAST_PROCESSED_RANGE = new Set();
+let isBrowserRunning = false;
 let browserInstance = null;
-let lastProcessedKey = new Set();
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-// ==================== UTILS ====================
-
+// ==================== UTILITY FUNCTIONS ====================
 async function sendMsg(text) {
     try {
         await bot.sendMessage(CHAT_ID, text, { parse_mode: 'HTML' });
-    } catch (e) { console.error("Error Tele:", e.message); }
+    } catch (e) { console.error("❌ Telegram Error:", e.message); }
 }
 
 async function sendPhoto(caption, photoPath) {
@@ -35,137 +34,144 @@ async function sendPhoto(caption, photoPath) {
         const form = new FormData();
         form.append('chat_id', CHAT_ID);
         form.append('caption', caption);
-        form.append('photo', fs.createReadStream(photoPath));
+        form.append('photo', fs.createReadStream(photoPath), { contentType: 'image/png' });
+        
         await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendPhoto`, form, { 
             headers: form.getHeaders() 
         });
-        fs.unlinkSync(photoPath); // Hapus setelah kirim
-    } catch (e) { console.error("Error Photo:", e.message); }
+        
+        // Hapus file setelah dikirim agar lokal bersih
+        fs.unlinkSync(photoPath);
+    } catch (e) { console.error("❌ Photo Error:", e.message); }
 }
 
 function parseCookies(cookieString, domain) {
     return cookieString.split(';').map(item => {
-        const [name, ...rest] = item.trim().split('=');
-        return { name, value: rest.join('='), domain, path: '/', httpOnly: false, secure: true };
-    });
+        const parts = item.trim().split('=');
+        return {
+            name: parts[0],
+            value: parts.slice(1).join('='),
+            domain: domain,
+            path: '/',
+            secure: true
+        };
+    }).filter(c => c.name);
 }
 
-function saveCache(data) {
-    let current = [];
-    if (fs.existsSync(CACHE_FILE_PATH)) {
-        try { current = JSON.parse(fs.readFileSync(CACHE_FILE_PATH, 'utf-8')); } catch (e) { current = []; }
-    }
-    current.unshift(data);
-    if (current.length > 100) current = current.slice(0, 100);
-    fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(current, null, 2));
-}
-
-// ==================== BOT COMMANDS ====================
-
-bot.onText(/\/addcookie (.+)/, async (msg, match) => {
+// ==================== BOT HANDLERS ====================
+bot.on('message', async (msg) => {
     if (msg.chat.id.toString() !== CHAT_ID) return;
-    const newCookie = match[1];
-    fs.writeFileSync(COOKIE_FILE, newCookie.trim(), 'utf-8');
-    await sendMsg("♻️ <b>Cookie Diperbarui!</b> Merestart scraper...");
-    startScraper();
+    const text = msg.text || "";
+
+    if (text.startsWith('/addcookie') || (text.includes('=') && text.includes(';'))) {
+        let cookieRaw = text.replace('/addcookie', '').trim();
+        fs.writeFileSync(COOKIE_FILE, cookieRaw, 'utf-8');
+        await sendMsg("♻️ <b>Cookie Diperbarui!</b> Sedang mencoba login ulang...");
+        
+        if (browserInstance) {
+            await browserInstance.close().catch(() => {});
+            isBrowserRunning = false;
+        }
+        startScraper();
+    }
 });
 
 // ==================== CORE SCRAPER ====================
-
 async function startScraper() {
-    if (isMonitoring && browserInstance) {
-        await browserInstance.close().catch(() => {});
-    }
-
+    if (isBrowserRunning) return;
     if (!fs.existsSync(COOKIE_FILE)) {
-        await sendMsg("⚠️ <b>Cookie tidak ditemukan!</b>\nGunakan perintah: <code>/addcookie [cookie_anda]</code>");
+        await sendMsg("⚠️ <b>Cookie tidak ditemukan!</b> Kirim cookie atau gunakan /addcookie.");
         return;
     }
 
-    isMonitoring = true;
+    isBrowserRunning = true;
     const browser = await chromium.launch({ headless: true });
     browserInstance = browser;
-    const context = await browser.newContext();
 
     try {
-        const rawCookie = fs.readFileSync(COOKIE_FILE, 'utf-8');
+        const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        });
+
+        const rawCookie = fs.readFileSync(COOKIE_FILE, 'utf-8').trim();
         await context.addCookies(parseCookies(rawCookie, "x.mnitnetwork.com"));
 
         const page = await context.newPage();
-        await page.goto(URLS.console, { waitUntil: 'networkidle' });
+        await page.goto(URLS.console, { waitUntil: 'networkidle', timeout: 60000 });
 
-        // Cek Login Success/Fail
+        await new Promise(r => setTimeout(r, 5000));
         const currentUrl = page.url();
-        const ssPath = `check_${Date.now()}.png`;
+        const ssPath = `login_${Date.now()}.png`;
         await page.screenshot({ path: ssPath });
 
-        if (currentUrl.includes('/login')) {
-            await sendPhoto("❌ <b>Login Gagal!</b> Cookie expired atau salah. Masukkan cookie baru lewat <code>/addcookie</code>", ssPath);
+        if (currentUrl.includes('login')) {
+            await sendPhoto("❌ <b>Login Gagal!</b> Cookie expired. Silahkan kirim cookie baru via /addcookie.", ssPath);
+            isBrowserRunning = false;
             await browser.close();
-            isMonitoring = false;
             return;
         }
 
-        await sendPhoto("✅ <b>Login Berhasil!</b> Monitoring berjalan setiap 4 detik.", ssPath);
+        await sendPhoto("✅ <b>Login Berhasil!</b> Monitoring berjalan (interval 4s).", ssPath);
 
-        // LOOP MONITORING DOM
-        while (isMonitoring) {
-            const rowSelector = "div.group.flex.flex-col";
-            const rows = await page.$$(rowSelector);
+        // Monitoring Loop
+        while (true) {
+            const rowSelector = ".group.flex.flex-col.sm\\:flex-row";
+            const rows = await page.locator(rowSelector).all();
 
             for (const row of rows) {
-                try {
-                    // Ambil Service
-                    const service = await row.$eval(".text-blue-400", el => el.innerText).catch(() => "");
-                    const serviceLow = service.toLowerCase();
+                // Seleksi teks spesifik sesuai struktur HTML yang diberikan
+                const phoneWithCountry = await row.locator(".text-slate-600.font-mono").innerText().catch(() => ""); 
+                const service = await row.locator(".text-blue-400").innerText().catch(() => "");
+                const message = await row.locator("p.font-mono").innerText().catch(() => "");
 
-                    // Filter Hanya WhatsApp & Facebook
-                    if (serviceLow.includes("whatsapp") || serviceLow.includes("facebook")) {
+                const serviceLower = service.toLowerCase();
+                if (serviceLower.includes('facebook') || serviceLower.includes('whatsapp')) {
+                    
+                    // Ekstrak Range dan Country: "23278967XXX • Sierra Leone"
+                    const parts = phoneWithCountry.split('•').map(s => s.trim());
+                    const range = parts[0] || "Unknown";
+                    const country = parts[1] || "Unknown";
+                    
+                    const cacheKey = `${range}_${service}_${message.slice(0, 10)}`;
+
+                    if (!LAST_PROCESSED_RANGE.has(cacheKey)) {
+                        const resultMsg = `Range:${range}\nCountry:${country}\nService:${service}\nfull_msg:${message.replace('➜', '').trim()}`;
                         
-                        // Ambil Range & Country dari text (Contoh: 23278967XXX • Sierra Leone)
-                        const rawInfo = await row.$eval(".text-slate-600.mt-1.font-mono", el => el.innerText).catch(() => "");
-                        const [range, country] = rawInfo.split(' • ').map(s => s.trim());
+                        await sendMsg(resultMsg);
+                        LAST_PROCESSED_RANGE.add(cacheKey);
 
-                        // Ambil Full Message
-                        const fullMsg = await row.$eval("p", el => el.innerText.replace('➜', '').trim()).catch(() => "");
-
-                        // Unik Key untuk mencegah duplikat (Range + Message)
-                        const uniqueKey = `${range}_${fullMsg.substring(0, 15)}`;
-
-                        if (!lastProcessedKey.has(uniqueKey)) {
-                            const data = {
-                                range: range,
-                                country: country || "Unknown",
-                                service: service,
-                                full_msg: fullMsg
-                            };
-
-                            saveCache(data);
-                            lastProcessedKey.add(uniqueKey);
-
-                            await sendMsg(`✨ <b>LOG TERDETEKSI</b>\n\n<b>Range:</b> <code>${data.range}</code>\n<b>Country:</b> ${data.country}\n<b>Service:</b> ${data.service}\n<b>Full Msg:</b> <code>${data.full_msg}</code>`);
-                        }
+                        // Save to cache file logic
+                        const data = { range, country, service, full_msg: message, detected_at: new Date().toISOString() };
+                        saveToCache(data);
                     }
-                } catch (err) { /* Skip row if error */ }
+                }
             }
 
-            // Batasi memory Set
-            if (lastProcessedKey.size > 200) lastProcessedKey.clear();
-
-            await new Promise(r => setTimeout(r, 4000));
-            await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+            if (LAST_PROCESSED_RANGE.size > 200) LAST_PROCESSED_RANGE.clear();
+            await new Promise(r => setTimeout(r, 4000)); // Delay 4 detik
         }
 
-    } catch (e) {
-        console.error("Scraper Error:", e.message);
-        isMonitoring = false;
+    } catch (err) {
+        console.error(err);
+        await sendMsg(`⚠️ <b>Error:</b> ${err.message}. Merestart...`);
+        isBrowserRunning = false;
         await browser.close().catch(() => {});
-        setTimeout(startScraper, 10000); // Auto-restart jika crash
+        setTimeout(startScraper, 5000);
     }
 }
 
-// ==================== INIT ====================
+function saveToCache(data) {
+    try {
+        const folder = path.dirname(CACHE_FILE_PATH);
+        if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
+        let cache = fs.existsSync(CACHE_FILE_PATH) ? JSON.parse(fs.readFileSync(CACHE_FILE_PATH)) : [];
+        cache.unshift(data);
+        fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(cache.slice(0, 100), null, 2));
+    } catch (e) {}
+}
+
+// Start
 (async () => {
-    console.log("🚀 Bot is running...");
+    console.log("🚀 Scraper Running...");
     startScraper();
 })();
