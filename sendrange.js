@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const FormData = require('form-data');
+const TelegramBot = require('node-telegram-bot-api');
 
 // ==================== KONFIGURASI ====================
 const CACHE_FILE_PATH = path.join(__dirname, '../get/cache_range.json');
@@ -15,9 +16,13 @@ const URLS = {
 };
 
 let LAST_PROCESSED_RANGE = new Set();
+let isBrowserRunning = false;
+
+// Initialize Telegram Bot untuk dengerin Cookie
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
 // ==================== FUNGSI TELEGRAM ====================
-async function sendTelegramMsg(text) {
+async function sendMsg(text) {
     try {
         await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
             chat_id: CHAT_ID, text: text, parse_mode: 'HTML'
@@ -25,7 +30,7 @@ async function sendTelegramMsg(text) {
     } catch (e) {}
 }
 
-async function sendTelegramPhoto(caption, photoPath) {
+async function sendPhoto(caption, photoPath) {
     try {
         const form = new FormData();
         form.append('chat_id', CHAT_ID);
@@ -34,6 +39,18 @@ async function sendTelegramPhoto(caption, photoPath) {
         await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendPhoto`, form, { headers: form.getHeaders() });
     } catch (e) {}
 }
+
+// ==================== LISTENER TOKEN DARI TELEGRAM ====================
+bot.on('message', async (msg) => {
+    if (msg.chat.id.toString() !== CHAT_ID) return;
+    const text = msg.text;
+
+    if (text && text.startsWith('eyJ')) {
+        fs.writeFileSync(COOKIE_FILE, text.trim(), 'utf-8');
+        await bot.sendMessage(CHAT_ID, "✅ <b>Cookie Diterima!</b> Memulai browser...");
+        if (!isBrowserRunning) startScraper();
+    }
+});
 
 // ==================== LOGIKA PENYIMPANAN ====================
 function saveToGetFolder(newData) {
@@ -50,29 +67,18 @@ function saveToGetFolder(newData) {
 
 // ==================== MAIN SCRAPER ====================
 async function startScraper() {
-    // --- STANDBY MODE: CEK FILE COOKIE ---
     if (!fs.existsSync(COOKIE_FILE)) {
-        console.log("⏳ [WAITING] File active_session.json tidak ditemukan.");
-        console.log("💡 Silahkan buat filenya sekarang di VPS...");
-        
-        // Kirim notif ke telegram hanya sekali tiap restart
-        if (!global.sentWaitNotif) {
-            await sendTelegramMsg("<b>[STANDBY]</b> File <code>active_session.json</code> belum ada.\n\nSegera buat filenya di VPS agar bot bisa lanjut login!");
-            global.sentWaitNotif = true;
-        }
-
-        // Cek lagi setiap 5 detik (Looping tanpa browser)
-        return setTimeout(startScraper, 5000);
+        console.log("⏳ Standby... Menunggu cookie dari Telegram.");
+        return;
     }
 
-    console.log("🚀 [SCRAPER] Cookie ditemukan! Memulai Browser...");
+    isBrowserRunning = true;
+    console.log("🚀 Memulai Browser dengan Cookie...");
     const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     const context = await browser.newContext();
     
     try {
         const cookieVal = fs.readFileSync(COOKIE_FILE, 'utf-8').trim();
-        
-        // Inject Cookie mauthtoken
         await context.addCookies([{
             name: 'mauthtoken',
             value: cookieVal,
@@ -84,27 +90,19 @@ async function startScraper() {
         }]);
 
         const page = await context.newPage();
-        
-        console.log("🛠️ Navigasi ke Console...");
         await page.goto(URLS.console, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 7000));
+        await new Promise(r => setTimeout(r, 8000));
 
-        // Verifikasi apakah sesi valid
         if (page.url().includes('login')) {
-            console.log("❌ Sesi tidak valid / expired.");
-            await page.screenshot({ path: 'expired.png' });
-            await sendTelegramPhoto("❌ <b>Cookie Expired!</b>\nSilahkan update file active_session.json dengan token baru.", 'expired.png');
-            
-            // Hapus file cookie yang sudah expired agar bot balik ke Standby Mode
-            fs.unlinkSync(COOKIE_FILE); 
-            global.sentWaitNotif = false;
+            await sendPhoto("❌ <b>Cookie Expired!</b> Kirim token baru lewat chat.", 'expired.png');
+            fs.unlinkSync(COOKIE_FILE);
+            isBrowserRunning = false;
             await browser.close();
-            return setTimeout(startScraper, 5000);
+            return;
         }
 
-        await sendTelegramMsg("✅ <b>Login Berhasil!</b> Monitoring sedang berjalan...");
+        await sendMsg("✅ <b>Login Berhasil!</b> Monitoring dimulai...");
 
-        // Loop Monitoring Data
         while (true) {
             const elements = await page.locator(".group.flex.flex-col.sm\\:flex-row").all();
             for (const el of elements) {
@@ -132,9 +130,12 @@ async function startScraper() {
 
     } catch (err) {
         console.error("🔥 Error:", err.message);
+        isBrowserRunning = false;
         await browser.close().catch(() => {});
         setTimeout(startScraper, 10000);
     }
 }
 
+// Jalankan Standby awal
+console.log("🤖 Bot Standby. Kirim mauthtoken di Telegram untuk mulai.");
 startScraper();
