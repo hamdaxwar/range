@@ -96,7 +96,7 @@ async function startScraper() {
     const page = await context.newPage();
 
     try {
-        await sendTelegramMsg("<b>[SYSTEM]</b> Scraper MNIT dimulai. Mencoba akses halaman login...");
+        await sendTelegramMsg("<b>[SYSTEM]</b> Mencoba akses login dengan Human Typing Simulation...");
 
         // 1. BUKA HALAMAN LOGIN
         console.log("🌐 Membuka Login...");
@@ -106,35 +106,49 @@ async function startScraper() {
             console.log("⚠️ Goto Timeout, lanjut cek elemen...");
         }
 
-        // Tunggu stabilitas (penting jika ada Cloudflare)
-        await new Promise(r => setTimeout(r, 8000)); 
+        // Tunggu stabilitas
+        await new Promise(r => setTimeout(r, 10000)); 
+        await page.mouse.move(Math.random() * 400, Math.random() * 400); // Gerakkan mouse acak
         await page.screenshot({ path: 'step1_login.png' });
         await sendTelegramPhoto("📸 Step 1: Halaman Login Terbuka", 'step1_login.png');
 
-        // 2. CEK INPUT & LOGIN
+        // 2. CEK INPUT & LOGIN (HUMAN TYPING)
         const emailInput = page.locator("input[type='email']");
         if (await emailInput.isVisible()) {
-            console.log("⌨️ Mengisi data login...");
-            await emailInput.fill(CREDENTIALS.email);
-            await page.fill("input[type='password']", CREDENTIALS.pw);
+            console.log("⌨️ Mengetik Email (Human Mode)...");
+            await emailInput.click();
             
+            // Ketik email satu per satu
+            for (const char of CREDENTIALS.email) {
+                await page.keyboard.type(char, { delay: Math.random() * 150 + 50 });
+            }
+
+            await new Promise(r => setTimeout(r, 800 + Math.random() * 1000));
+
+            console.log("⌨️ Mengetik Password (Human Mode)...");
+            await page.locator("input[type='password']").click();
+            for (const char of CREDENTIALS.pw) {
+                await page.keyboard.type(char, { delay: Math.random() * 100 + 50 });
+            }
+            
+            await new Promise(r => setTimeout(r, 2000));
             await page.screenshot({ path: 'step2_filled.png' });
-            await sendTelegramPhoto("📸 Step 2: Form terisi, menekan ENTER...", 'step2_filled.png');
+            await sendTelegramPhoto("📸 Step 2: Form terisi manual, menekan ENTER...", 'step2_filled.png');
             
             await page.keyboard.press('Enter');
         } else {
-            throw new Error("Input email tidak ditemukan (Mungkin terhalang Captcha/Cloudflare)");
+            throw new Error("Input email tidak ditemukan (Mungkin kena Cloudflare)");
         }
 
         // 3. TUNGGU PROSES LOGIN
         console.log("⏳ Menunggu redirect...");
-        await new Promise(r => setTimeout(r, 12000));
+        await new Promise(r => setTimeout(r, 15000));
         await page.screenshot({ path: 'step3_after_login.png' });
         
         const currentUrl = page.url();
         if (currentUrl.includes('login')) {
-            await sendTelegramPhoto(`⚠️ Gagal Login. URL masih: ${currentUrl}`, 'step3_after_login.png');
-            throw new Error("Gagal melewati halaman login.");
+            await sendTelegramPhoto(`⚠️ Masih di halaman login. URL: ${currentUrl}`, 'step3_after_login.png');
+            throw new Error("Gagal login (Deteksi Bot atau Salah Password)");
         }
 
         await sendTelegramPhoto("✅ Login Berhasil! Menuju Console...", 'step3_after_login.png');
@@ -175,7 +189,7 @@ async function startScraper() {
                             });
                             
                             LAST_PROCESSED_RANGE.add(cacheKey);
-                            console.log(`✨ [NEW] ${cleanPhone} Detected!`);
+                            console.log(`✨ [NEW] ${cleanPhone}`);
                         }
                     }
                 }
@@ -183,10 +197,8 @@ async function startScraper() {
                 if (LAST_PROCESSED_RANGE.size > 200) LAST_PROCESSED_RANGE.clear();
                 
             } catch (e) {
-                console.log("⚠️ Scrape loop error, retrying...");
+                console.log("⚠️ Scrape error...");
             }
-            
-            // Tunggu 15 detik sebelum cek lagi
             await new Promise(r => setTimeout(r, 15000));
         }
 
@@ -196,10 +208,9 @@ async function startScraper() {
         await sendTelegramPhoto(`🔥 <b>FATAL ERROR:</b>\n<code>${fatal.message}</code>`, 'fatal_error.png');
         
         await browser.close().catch(() => {});
-        console.log("🔄 Me-restart scraper dalam 15 detik...");
-        setTimeout(startScraper, 15000);
+        console.log("🔄 Me-restart scraper dalam 20 detik...");
+        setTimeout(startScraper, 20000);
     }
 }
 
-// Jalankan
 startScraper();
