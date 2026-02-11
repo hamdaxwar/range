@@ -55,18 +55,18 @@ function saveToGetFolder(newData) {
         const existingIndex = currentCache.findIndex(item => item.range === newData.range);
 
         if (existingIndex !== -1) {
-            // Jika range sama, cek apakah message-nya berbeda
+            // Jika range sama, cek apakah pesannya berbeda
             if (currentCache[existingIndex].full_msg !== newData.full_msg) {
-                // Hapus data lama, masukkan yang baru di posisi paling atas
+                // Pesan beda: Hapus data lama (agar yang baru masuk ke urutan paling atas)
                 currentCache.splice(existingIndex, 1);
                 currentCache.unshift(newData);
-                console.log(`[UPDATE] Pesan baru untuk range: ${newData.range}`);
+                console.log(`[UPDATE] Range ${newData.range} diperbarui.`);
             } else {
-                // Jika range dan pesan sama, tidak perlu simpan (duplikat persis)
+                // Pesan sama: Abaikan agar tidak duplikat
                 return;
             }
         } else {
-            // Jika range benar-benar baru, masukkan ke atas
+            // Range benar-benar baru: Masukkan ke paling atas
             currentCache.unshift(newData);
             console.log(`[NEW] Range ditambahkan: ${newData.range}`);
         }
@@ -92,6 +92,7 @@ async function startScraper() {
     });
 
     const context = await browser.newContext({
+        viewport: { width: 1280, height: 800 },
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     });
 
@@ -106,16 +107,23 @@ async function startScraper() {
         const page = await context.newPage();
         await page.goto(URLS.console, { waitUntil: 'domcontentloaded', timeout: 60000 });
         
-        // Tunggu sebentar untuk loading data dashboard
-        await page.waitForTimeout(10000);
+        // Tunggu proses login/dashboard rendering
+        await new Promise(r => setTimeout(r, 12000));
 
         if (page.url().includes('login')) {
-            await bot.sendMessage(CHAT_ID, "❌ Login Gagal. Cookie kadaluwarsa.");
+            await bot.sendMessage(CHAT_ID, "❌ Login Gagal. Cookie mungkin sampah.");
             await browser.close();
+            isLocked = false;
             return;
         }
 
-        // Loop Monitoring
+        // --- FITUR SCREENSHOT ---
+        const ssPath = 'login_success.png';
+        await page.screenshot({ path: ssPath, fullPage: false });
+        await bot.sendPhoto(CHAT_ID, ssPath, { caption: "✅ Berhasil Login ke Console!" });
+        if (fs.existsSync(ssPath)) fs.unlinkSync(ssPath); // Hapus file lokal setelah kirim
+
+        // ================= LOOP MONITORING =================
         while (true) {
             try {
                 const rowSelector = ".group.flex.flex-col.sm\\:flex-row";
@@ -126,9 +134,7 @@ async function startScraper() {
                     const serviceRaw = await el.locator(".text-blue-400").innerText().catch(() => "");
                     const messageRaw = await el.locator("p.font-mono").innerText().catch(() => "");
 
-                    const isTarget = serviceRaw.toLowerCase().includes('facebook') || serviceRaw.toLowerCase().includes('whatsapp');
-
-                    if (isTarget && phoneInfo) {
+                    if (serviceRaw.toLowerCase().includes('facebook') || serviceRaw.toLowerCase().includes('whatsapp')) {
                         const splitInfo = phoneInfo.split('•').map(s => s.trim());
                         const range = splitInfo[0] || "Unknown";
                         const country = splitInfo[1] || "Unknown";
@@ -141,20 +147,22 @@ async function startScraper() {
                             detected_at: new Date().toLocaleString('id-ID')
                         };
 
-                        // Kirim ke fungsi pengolah cache
+                        // Kirim ke pengolah cache logic (Cek Duplikat & Limit 25)
                         saveToGetFolder(data);
                     }
                 }
-            } catch (innerErr) {
-                console.log("Error saat scraping row:", innerErr.message);
+            } catch (loopErr) {
+                console.error("Error dalam loop:", loopErr.message);
             }
             
-            await page.waitForTimeout(5000); // Scan setiap 5 detik
+            await new Promise(r => setTimeout(r, 5000));
         }
 
     } catch (err) {
-        console.error("Scraper Error:", err.message);
-        // Tetap menyala meskipun error, atau bisa tambahkan restart logic jika perlu
+        console.error("Scraper Fatal Error:", err.message);
+        await bot.sendMessage(CHAT_ID, `⚠️ Scraper terhenti: ${err.message}`);
+        isLocked = false;
+        await browser.close();
     }
 }
 
