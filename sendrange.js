@@ -1,149 +1,233 @@
-const { chromium, devices } = require('playwright');
+const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
 const axios = require('axios');
 const FormData = require('form-data');
 const TelegramBot = require('node-telegram-bot-api');
-const fs = require('fs');
+const os = require('os');
 
 // ==================== KONFIGURASI ====================
+const CACHE_FILE_PATH = path.join(__dirname, '../get/cache_range.json');
 const TELEGRAM_TOKEN = "8558006836:AAGR3N4DwXYSlpOxjRvjZcPAmC1CUWRJexY";
 const CHAT_ID = "7184123643";
-const LOGIN_URL = "https://x.mnitnetwork.com/mauth/login";
-const CONSOLE_URL = "https://x.mnitnetwork.com/mdashboard/console";
-const USER_DATA_DIR = './user_session_safe'; 
+const COOKIE_FILE = path.join(__dirname, 'active_session.json');
+
+const URLS = {
+    console: "https://x.mnitnetwork.com/mdashboard/console"
+};
 
 let LAST_PROCESSED_RANGE = new Set();
-let browserContext = null;
-let pageInstance = null;
-let canStartMonitoring = false;
-let lastDataTimestamp = Date.now();
+let isBrowserRunning = false;
+let browserInstance = null;
 
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-const iPhone = devices['iPhone 13'];
+// ==================== INIT TELEGRAM BOT ====================
+const bot = new TelegramBot(TELEGRAM_TOKEN, { 
+    polling: {
+        interval: 2000,
+        autoStart: true,
+        params: { timeout: 10 }
+    } 
+});
 
-// ==================== UTILITY ====================
+// ==================== TELEGRAM FUNCTIONS ====================
 async function sendMsg(text) {
-    try { await bot.sendMessage(CHAT_ID, text, { parse_mode: 'HTML' }); } catch (e) {}
+    try {
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+            chat_id: CHAT_ID,
+            text: text,
+            parse_mode: 'HTML'
+        });
+    } catch (e) {
+        console.error("❌ Gagal kirim pesan Telegram:", e.message);
+    }
 }
 
-async function sendPhoto(caption, buffer) {
+async function sendPhoto(caption, photoPath) {
     try {
+        if (!fs.existsSync(photoPath)) return;
         const form = new FormData();
         form.append('chat_id', CHAT_ID);
         form.append('caption', caption);
-        form.append('photo', buffer, { filename: 'screenshot.png' });
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendPhoto`, form, { headers: form.getHeaders() });
-    } catch (e) {}
+        form.append('photo', fs.createReadStream(photoPath));
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendPhoto`, form, { 
+            headers: form.getHeaders() 
+        });
+    } catch (e) {
+        console.error("❌ Gagal kirim foto:", e.message);
+    }
 }
 
+// ==================== PESAN AWAL BOT ====================
+async function notifyBotStart() {
+    const msg = `
+🤖 <b>BOT AKTIF</b>
+
+Silahkan kirim COOKIE disini untuk login.
+(Contoh: mauthtoken=xxx; twk_idm_key=xxx; ...)
+`;
+    await sendMsg(msg);
+}
+
+// ==================== PARSE COOKIE STRING ====================
 function parseCookies(cookieString, domain) {
     return cookieString.split(';').map(item => {
-        const parts = item.trim().split('=');
-        if (parts.length < 2) return null;
-        return { name: parts[0], value: parts.slice(1).join('='), domain: domain, path: '/', secure: true, sameSite: 'Lax' };
-    }).filter(c => c !== null);
+        const [name, ...rest] = item.trim().split('=');
+        return {
+            name: name,
+            value: rest.join('='),
+            domain: domain,
+            path: '/',
+            httpOnly: false,
+            secure: true
+        };
+    });
 }
 
-// ==================== BOT HANDLERS ====================
+// ==================== LISTENER COOKIE TELEGRAM ====================
 bot.on('message', async (msg) => {
     if (msg.chat.id.toString() !== CHAT_ID) return;
-    const text = msg.text || "";
 
-    if (text.startsWith('/addcookie')) {
-        const cookieRaw = text.replace('/addcookie', '').trim();
-        if (!cookieRaw) return sendMsg("⚠️ Masukkan cookie!");
+    const text = msg.text;
+    if (!text) return;
 
-        await sendMsg("♻️ <b>Processing Session...</b>");
-        
-        try {
-            const cookies = parseCookies(cookieRaw, "x.mnitnetwork.com");
-            await browserContext.addCookies(cookies);
-            
-            // Gunakan navigasi yang lebih "halus"
-            await pageInstance.goto(CONSOLE_URL, { waitUntil: 'commit', timeout: 30000 }).catch(() => {});
-            
-            // Jeda acak 5-8 detik untuk simulasi manusia
-            await new Promise(r => setTimeout(r, 5000 + Math.random() * 3000));
+    // deteksi cookie full (ada "=" dan ";")
+    if (text.includes('=') && text.includes(';')) {
 
-            const ss = await pageInstance.screenshot();
-            const currentUrl = pageInstance.url();
+        // simpan cookie full
+        fs.writeFileSync(COOKIE_FILE, text.trim(), 'utf-8');
 
-            if (currentUrl.includes('login') || (await pageInstance.content()).includes('Verify you are human')) {
-                await sendPhoto("❌ <b>Cloudflare Detected!</b> Coba ambil cookie baru dari Chrome Incognito di HP asli.", ss);
-            } else {
-                await sendPhoto("✅ <b>Session Sync Berhasil!</b>\nKetik <code>/mulai</code> untuk monitoring.", ss);
-            }
-        } catch (e) {
-            await sendMsg("🔥 Error: " + e.message);
+        await sendMsg("✅ <b>Cookie diterima!</b>\n📁 File diperbarui\n🚀 Login dimulai...");
+
+        // kalau browser masih hidup → restart
+        if (browserInstance) {
+            try {
+                await browserInstance.close();
+            } catch {}
+            isBrowserRunning = false;
         }
-    }
 
-    if (text === '/mulai') {
-        canStartMonitoring = true;
-        lastDataTimestamp = Date.now();
-        await sendMsg("🚀 <b>Monitoring Aktif!</b>");
+        startScraper();
     }
 });
 
-// ==================== CORE ENGINE ====================
-async function initBrowser() {
-    console.log("🚀 Starting Stealth iPhone Engine...");
-    
-    browserContext = await chromium.launchPersistentContext(USER_DATA_DIR, {
-        headless: true,
-        ...iPhone,
+// ==================== CACHE SAVE ====================
+function saveToGetFolder(newData) {
+    const folderPath = path.dirname(CACHE_FILE_PATH);
+    if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
+
+    let currentCache = [];
+    if (fs.existsSync(CACHE_FILE_PATH)) {
+        try {
+            currentCache = JSON.parse(fs.readFileSync(CACHE_FILE_PATH, 'utf-8'));
+        } catch (e) {
+            currentCache = [];
+        }
+    }
+
+    currentCache.unshift(newData);
+    if (currentCache.length > 100) currentCache = currentCache.slice(0, 100);
+
+    fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(currentCache, null, 2));
+}
+
+// ==================== MAIN SCRAPER (LOGIN COOKIE) ====================
+async function startScraper() {
+    if (!fs.existsSync(COOKIE_FILE)) {
+        console.log("⏳ Menunggu cookie...");
+        return;
+    }
+
+    isBrowserRunning = true;
+
+    const browser = await chromium.launch({ 
+        headless: true, 
         args: [
-            '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
-            '--disable-infobars',
-            '--disable-dev-shm-usage'
-        ],
-        ignoreDefaultArgs: ['--enable-automation']
-    });
-    
-    pageInstance = browserContext.pages()[0] || await browserContext.newPage();
-
-    // Bypass navigator.webdriver
-    await pageInstance.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            '--disable-setuid-sandbox',
+            '--disable-blink-features=AutomationControlled'
+        ] 
     });
 
-    await pageInstance.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
-    const ss = await pageInstance.screenshot();
-    await sendPhoto("🤖 <b>Bot Online</b>\nKirim <code>/addcookie</code>", ss);
+    browserInstance = browser;
 
-    while (true) {
-        if (canStartMonitoring) {
-            try {
-                // Gunakan locator yang lebih spesifik untuk row data
-                const rows = await pageInstance.locator(".group.flex.flex-col").all();
-                for (const row of rows) {
-                    const phoneInfo = await row.locator(".text-slate-600").innerText().catch(() => ""); 
-                    const serviceRaw = await row.locator(".text-blue-400").innerText().catch(() => "");
-                    const messageRaw = await row.locator("p").innerText().catch(() => "");
+    const context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    });
 
-                    if (serviceRaw.toLowerCase().includes('facebook') || serviceRaw.toLowerCase().includes('whatsapp')) {
-                        const range = phoneInfo.split('•')[0].trim() || "Unknown";
-                        const country = phoneInfo.split('•')[1]?.trim() || "Unknown";
-                        const cacheKey = `${range}_${messageRaw.slice(-10)}`;
+    try {
+        // baca cookie full
+        const rawCookie = fs.readFileSync(COOKIE_FILE, 'utf-8').trim();
 
-                        if (!LAST_PROCESSED_RANGE.has(cacheKey)) {
-                            await sendMsg(`Range:${range}\nCountry:${country}\nService:${serviceRaw}\nfull_msg:${messageRaw.trim()}`);
-                            LAST_PROCESSED_RANGE.add(cacheKey);
-                            lastDataTimestamp = Date.now(); 
-                        }
+        // parse cookie → array
+        const cookies = parseCookies(rawCookie, "x.mnitnetwork.com");
+
+        // inject semua cookie
+        await context.addCookies(cookies);
+
+        const page = await context.newPage();
+        await page.goto(URLS.console, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+        await new Promise(r => setTimeout(r, 10000));
+
+        const currentUrl = page.url();
+        const screenshotPath = 'login_result.png';
+        await page.screenshot({ path: screenshotPath });
+
+        // cek login gagal
+        if (currentUrl.includes('login')) {
+            await sendPhoto("❌ <b>Login gagal!</b>\nCookie expired / invalid.", screenshotPath);
+            isBrowserRunning = false;
+            await browser.close();
+            return;
+        }
+
+        await sendPhoto("✅ <b>Login berhasil!</b>\nMonitoring dimulai.", screenshotPath);
+
+        // ================= LOOP MONITORING =================
+        while (true) {
+            const rowSelector = ".group.flex.flex-col.sm\\:flex-row";
+            const elements = await page.locator(rowSelector).all();
+
+            for (const el of elements) {
+                const phoneRaw = await el.locator(".font-mono").first().innerText().catch(() => "");
+                const serviceRaw = await el.locator(".text-blue-400").innerText().catch(() => "");
+                const messageRaw = await el.locator("p").innerText().catch(() => "");
+
+                if (phoneRaw.includes('XXX')) {
+                    const cleanPhone = phoneRaw.trim();
+                    const cacheKey = `${cleanPhone}_${serviceRaw}`;
+
+                    if (!LAST_PROCESSED_RANGE.has(cacheKey)) {
+                        const data = {
+                            range: cleanPhone,
+                            service: serviceRaw.toLowerCase().includes('whatsapp') ? 'whatsapp' : 'facebook',
+                            full_msg: messageRaw.trim(),
+                            detected_at: new Date().toLocaleString('id-ID')
+                        };
+
+                        saveToGetFolder(data);
+                        LAST_PROCESSED_RANGE.add(cacheKey);
+
+                        await sendMsg(`✨ <b>RANGE TERDETEKSI</b>\n\n📱 ${cleanPhone}\n⚙️ ${data.service}`);
                     }
                 }
+            }
 
-                if (Date.now() - lastDataTimestamp > 600000) {
-                    const ssIdle = await pageInstance.screenshot();
-                    await sendPhoto("⚠️ 10 Menit sepi. Masih aman?", ssIdle);
-                    lastDataTimestamp = Date.now(); 
-                }
-                if (LAST_PROCESSED_RANGE.size > 500) LAST_PROCESSED_RANGE.clear();
-            } catch (err) {}
+            if (LAST_PROCESSED_RANGE.size > 500) LAST_PROCESSED_RANGE.clear();
+            await new Promise(r => setTimeout(r, 15000));
         }
-        await new Promise(r => setTimeout(r, 4000));
+
+    } catch (err) {
+        await sendMsg(`🔥 <b>Error Sistem:</b>\n<code>${err.message}</code>\nRestart...`);
+        isBrowserRunning = false;
+        await browser.close().catch(() => {});
+        setTimeout(startScraper, 10000);
     }
 }
 
-initBrowser().catch(err => console.error(err));
+// ==================== START BOT ====================
+(async () => {
+    console.log("🤖 Bot Standby...");
+    await notifyBotStart();
+    startScraper();
+})();
