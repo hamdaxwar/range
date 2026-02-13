@@ -12,8 +12,8 @@ const TELEGRAM_TOKEN = "8558006836:AAGR3N4DwXYSlpOxjRvjZcPAmC1CUWRJexY";
 const CHAT_ID = "7184123643";
 const COOKIE_FILE = path.join(__dirname, 'active_session.json');
 
-// PATH CHROMIUM TERMUX
-const CHROMIUM_PATH = "/data/data/com.termux/files/usr/bin/chromium-browser";
+// PATH CHROMIUM
+const CHROMIUM_PATH = "/usr/bin/chromium-browser";
 
 const URLS = {
     console: "https://x.mnitnetwork.com/mdashboard/console"
